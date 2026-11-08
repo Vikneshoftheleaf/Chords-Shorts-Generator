@@ -1,21 +1,45 @@
 from __future__ import annotations
 
 import gzip
+import io
 import json
 import shutil
 import sqlite3
 import subprocess
+import sys
+import urllib.request
+import wave
 from pathlib import Path
 
 import pytest
 import imageio_ffmpeg
+import numpy as np
+from PIL import Image, ImageDraw
 
 from music_shorts.pipeline import (
     DatasetError,
     Ledger,
+    _midi_track,
+    _format_display_name,
+    _caption_phrases,
+    _font,
+    _intro_script,
+    INTRO_VOICE_LENGTH_SCALE,
+    INTRO_VOICE_VOLUME,
+    _lookup_itunes_artwork,
+    _progression_excerpt,
+    _render_intro_frame,
+    _render_outro_frame,
+    _render_frame,
+    _synthesize_intro,
     generate_song,
+    NoteEvent,
     parse_dataset_bytes,
+    _chord_name,
     select_songs,
+    synthesize,
+    Song,
+    TrackArtwork,
 )
 
 FIXTURE = Path(__file__).parent / "fixtures" / "song.json"
@@ -52,6 +76,8 @@ def test_parses_native_hooktheory_annotations_and_alignment():
     song = songs[0]
     assert song.song_id == "source-song"
     assert song.title == "sample-artist - sample-title"
+    assert song.artist == "sample-artist"
+    assert song.track_name == "sample-title"
     assert song.tempo == pytest.approx(120)
     assert song.melody[0].notes == (69,)
     assert song.melody[0].start == pytest.approx(0.5)
@@ -100,6 +126,333 @@ def test_ledger_persists_duplicate_ids(tmp_path):
             ledger.record("fixture-song-001", Path("outputs/again.mp4"))
 
 
+def test_ledger_can_refresh_existing_video_metadata(tmp_path):
+    db = tmp_path / "ledger.sqlite3"
+    with Ledger(db) as ledger:
+        ledger.record("fixture-song-001", Path("outputs/old.mp4"))
+        ledger.record("fixture-song-001", Path("outputs/refreshed.mp4"), replace_existing=True)
+        assert ledger.generated_ids() == {"fixture-song-001"}
+        row = ledger.connection.execute(
+            "SELECT output_path FROM generated WHERE song_id = ?",
+            ("fixture-song-001",),
+        ).fetchone()
+        assert row == ("outputs/refreshed.mp4",)
+
+
+def test_piano_synthesis_is_stereo_audible_and_has_smooth_attack(tmp_path):
+    song = fixture_songs()[0]
+    wav_path = tmp_path / "piano.wav"
+    synthesize(song, wav_path, duration_limit=3)
+
+    with wave.open(str(wav_path), "rb") as wav:
+        assert wav.getnchannels() == 2
+        assert wav.getframerate() == 44_100
+        samples = np.frombuffer(wav.readframes(wav.getnframes()), dtype="<i2")
+    samples = samples.reshape(-1, 2).astype(np.float64) / 32768
+    assert np.sqrt(np.mean(samples**2)) > 0.08
+    assert np.max(np.abs(samples)) < 0.98
+    assert np.sqrt(np.mean(samples[:4410] ** 2)) > 0.02
+    assert np.any(samples[:, 0] != samples[:, 1])
+
+
+def test_midi_track_preserves_simultaneous_chords_and_melody():
+    track = _midi_track(fixture_songs()[0], duration=3)
+    assert track.startswith(b"MTrk")
+    assert b"\x90" in track
+    assert b"\x91" in track
+    assert b"\xff\x51\x03\x07\xa1\x20" in track
+    assert track.endswith(b"\xff\x2f\x00")
+
+
+@pytest.mark.skipif(
+    shutil.which("fluidsynth") is None and sys.platform != "win32",
+    reason="FluidSynth is not installed",
+)
+def test_freepats_ydp_soundfont_generates_audible_stereo_audio(tmp_path):
+    soundfont = (
+        Path(__file__).parents[1]
+        / "assets"
+        / "soundfonts"
+        / "YDP-GrandPiano-SF2.tar.bz2"
+    )
+    output = generate_song(
+        fixture_songs()[0],
+        tmp_path / "outputs",
+        3,
+        soundfont=soundfont,
+        include_intro=False,
+    )
+    probe = subprocess.run(
+        [imageio_ffmpeg.get_ffmpeg_exe(), "-hide_banner", "-i", str(output), "-map", "0:a:0", "-f", "null", "-"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert "Audio: aac" in probe.stderr and "stereo" in probe.stderr
+    decoded_audio = subprocess.run(
+        [
+            imageio_ffmpeg.get_ffmpeg_exe(),
+            "-v",
+            "error",
+            "-i",
+            str(output),
+            "-map",
+            "0:a:0",
+            "-ar",
+            "44100",
+            "-ac",
+            "2",
+            "-f",
+            "s16le",
+            "-",
+        ],
+        capture_output=True,
+        check=True,
+    )
+    samples = np.frombuffer(decoded_audio.stdout, dtype="<i2").astype(np.float64) / 32768
+    assert len(samples) > 44_100 * 3 * 2
+    assert np.sqrt(np.mean(samples**2)) > 0.02
+    assert np.max(np.abs(samples)) < 0.98
+
+
+def test_horizontal_piano_roll_shows_melody_and_chord_without_note_labels():
+    song = fixture_songs()[0]
+    artwork = Image.new("RGB", (32, 32), (12, 34, 56))
+    image = _render_frame(song, now=0.2, duration=3, artwork=artwork)
+    chord_y = round(152 + (108 - 48) * (1128 / 88) + (1128 / 176))
+    melody_y = round(152 + (108 - 72) * (1128 / 88) + (1128 / 176))
+    chord_pixel = image.getpixel((120, chord_y))
+    melody_pixel = image.getpixel((120, melody_y))
+    assert image.size == (720, 1280)
+    assert chord_pixel == (240, 46, 73)
+    assert melody_pixel == (66, 213, 187)
+    assert image.getpixel((40, 40)) == (12, 34, 56)
+    assert image.getpixel((400, 5)) == (13, 17, 24)
+    assert image.getpixel((400, 1275)) == (23, 31, 40)
+    assert sum(
+        1
+        for x in range(720)
+        for y in range(1150, 1220)
+        if min(image.getpixel((x, y))) > 235
+    ) > 5
+
+
+def test_itunes_artwork_requires_exact_artist_and_track_match(monkeypatch):
+    song = parse_dataset_bytes(
+        gzip.compress(
+            json.dumps(
+                {
+                    "source-song": {
+                        "tags": ["MELODY", "HARMONY"],
+                        "hooktheory": {
+                            "id": "source-song",
+                            "artist": "sample-artist",
+                            "song": "sample-title",
+                        },
+                        "alignment": {
+                            "refined": {"beats": [0, 1], "times": [0.0, 0.5]}
+                        },
+                        "annotations": {
+                            "melody": [
+                                {"onset": 0, "offset": 1, "octave": 0, "pitch_class": 9}
+                            ],
+                            "harmony": [
+                                {
+                                    "onset": 0,
+                                    "offset": 1,
+                                    "root_pitch_class": 0,
+                                    "root_position_intervals": [4, 3],
+                                }
+                            ],
+                        },
+                    }
+                }
+            ).encode()
+        )
+    )[0]
+    cover = io.BytesIO()
+    Image.new("RGB", (8, 8), (90, 120, 150)).save(cover, format="PNG")
+    search_response = {
+        "results": [
+            {
+                "artistName": "sample-artist",
+                "trackName": "sample-title (Live)",
+                "artworkUrl100": "https://example.test/wrong/100x100bb.jpg",
+            },
+            {
+                "artistName": "SAMPLE ARTIST",
+                "trackName": "Sample Title",
+                "artworkUrl100": "https://example.test/right/100x100bb.jpg",
+            },
+        ]
+    }
+    responses = iter(
+        [
+            io.BytesIO(json.dumps(search_response).encode()),
+            io.BytesIO(cover.getvalue()),
+        ]
+    )
+    requested_urls: list[str] = []
+
+    def fake_urlopen(request, timeout):
+        assert timeout == 8
+        requested_urls.append(request.full_url)
+        return next(responses)
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    artwork = _lookup_itunes_artwork(song)
+
+    assert artwork is not None
+    assert artwork.image.getpixel((0, 0)) == (90, 120, 150)
+    assert artwork.artist == "SAMPLE ARTIST"
+    assert artwork.track_name == "Sample Title"
+    assert "600x600bb.jpg" in requested_urls[1]
+
+
+def test_fallback_artwork_is_generated_and_deterministic():
+    from music_shorts.pipeline import _fallback_artwork
+
+    song = fixture_songs()[0]
+    first = _fallback_artwork(song)
+    second = _fallback_artwork(song)
+    assert first.size == (256, 256)
+    assert np.asarray(first).tobytes() == np.asarray(second).tobytes()
+
+
+def test_intro_script_and_progression_stop_at_final_chord():
+    original = fixture_songs()[0]
+    song = Song(
+        original.song_id,
+        "sample-artist - sample-title",
+        original.tempo,
+        original.chords,
+        (*original.melody, NoteEvent(2.2, 0.7, (80,))),
+        "sample-artist",
+        "sample title",
+    )
+    progression, duration = _progression_excerpt(song, 60)
+
+    assert _intro_script(song) == (
+        "Here is the chord progression for Sample Title by Sample Artist."
+    )
+    assert duration == pytest.approx(1.6)
+    assert progression.duration == pytest.approx(duration)
+    assert progression.melody[-1].start + progression.melody[-1].duration <= duration
+
+
+def test_intro_and_outro_frames_include_requested_content():
+    song = fixture_songs()[0]
+    artwork = TrackArtwork(Image.new("RGB", (200, 200), "#5790c0"), "Sample Artist", "Sample Title")
+    progression = _render_frame(song, 0.2, 1.6, artwork)
+    intro = _render_intro_frame(progression, artwork, "This is how you can")
+    outro = _render_outro_frame(progression)
+
+    assert intro.size == (720, 1280)
+    assert outro.size == (720, 1280)
+    assert np.asarray(intro).tobytes() != np.asarray(progression).tobytes()
+    assert np.asarray(outro).tobytes() != np.asarray(progression).tobytes()
+
+
+def test_intro_uses_faster_phrase_audio_and_matched_caption_cues(tmp_path, monkeypatch):
+    import music_shorts.pipeline as pipeline
+
+    class FakeVoice:
+        calls = []
+
+        def synthesize_wav(self, text, wav_file, *, syn_config):
+            assert syn_config.length_scale == pytest.approx(INTRO_VOICE_LENGTH_SCALE)
+            assert syn_config.volume == pytest.approx(INTRO_VOICE_VOLUME)
+            self.calls.append(text)
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(2)
+            wav_file.setframerate(22_050)
+            wav_file.writeframes(bytes(22_050 // 5 * 2))
+
+    original = fixture_songs()[0]
+    song = Song(
+        original.song_id,
+        original.title,
+        original.tempo,
+        original.chords,
+        original.melody,
+        "sample artist",
+        "sample title",
+    )
+    voice = FakeVoice()
+    monkeypatch.setattr(pipeline, "_piper_voice", lambda: voice)
+    duration, cues = _synthesize_intro(song, tmp_path / "narration.wav")
+    expected_phrases = _caption_phrases(_intro_script(song))
+
+    assert tuple(cue.text for cue in cues) == expected_phrases
+    assert len(cues) == 3
+    assert voice.calls == [_intro_script(song)]
+    assert cues[0].start == 0
+    assert cues[0].end == pytest.approx(
+        duration * len(cues[0].text) / sum(len(cue.text) for cue in cues)
+    )
+    assert cues[1].start == pytest.approx(cues[0].end)
+    assert cues[1].end == pytest.approx(cues[2].start)
+    assert cues[-1].end == pytest.approx(duration)
+    assert duration == pytest.approx(0.2)
+    with wave.open(str(tmp_path / "narration.wav"), "rb") as wav_file:
+        assert wav_file.getnframes() / wav_file.getframerate() == pytest.approx(duration)
+
+
+def test_caption_phrases_split_voice_into_readable_cues_and_use_comic_font():
+    sentence = "Here is the chord progression for Orbion by Armin Van Buuren."
+    captions = _caption_phrases(sentence)
+
+    assert captions == (
+        "Here is the chord",
+        "progression for Orbion by",
+        "Armin Van Buuren.",
+    )
+    assert " ".join(captions) == sentence
+    assert INTRO_VOICE_LENGTH_SCALE < 1.0
+    assert _font(32).getname()[0] == "Bangers"
+
+
+def test_outro_blurs_backdrop_and_keeps_white_cta_text_sharp():
+    source = Image.new("RGB", (720, 1280), "black")
+    draw = ImageDraw.Draw(source)
+    for x in range(0, 100, 4):
+        draw.rectangle((x, 400, x + 1, 450), fill="white")
+
+    outro = np.asarray(_render_outro_frame(source))
+    source_patch = np.asarray(source)[400:451, 0:100]
+    blurred_patch = outro[400:451, 0:100]
+    like_caption = outro[560:600, 80:190]
+
+    assert blurred_patch.std() < source_patch.std()
+    assert np.count_nonzero(np.all(like_caption > 245, axis=2)) > 0
+
+
+@pytest.mark.parametrize(
+    ("value", "artist", "expected"),
+    [
+        ("armin-van-buuren", True, "Armin Van Buuren"),
+        ("armin–van-buuren", True, "Armin Van Buuren"),
+        ("orbion", False, "Orbion"),
+        ("a state of trance", False, "A State Of Trance"),
+    ],
+)
+def test_display_metadata_fixes_hyphens_and_capitalization(value, artist, expected):
+    assert _format_display_name(value, artist=artist) == expected
+
+
+@pytest.mark.parametrize(
+    ("notes", "label"),
+    [
+        ((60, 64, 67), "C Major"),
+        ((57, 60, 64), "A Minor"),
+        ((60, 64, 67, 70), "C7"),
+        ((60, 63, 66, 69), "C Diminished 7"),
+    ],
+)
+def test_chord_caption_uses_chord_name_instead_of_note_list(notes, label):
+    assert _chord_name(notes) == label
+
+
 def test_fixture_generates_playable_mp4_and_second_run_skips(tmp_path):
     assert shutil.which("ffmpeg") or Path(imageio_ffmpeg.get_ffmpeg_exe()).is_file()
     songs = fixture_songs()
@@ -108,13 +461,25 @@ def test_fixture_generates_playable_mp4_and_second_run_skips(tmp_path):
 
     first = select_songs(songs, set(), 1)
     assert len(first) == 1
-    output = generate_song(first[0], output_dir, duration_limit=3)
+    output = generate_song(first[0], output_dir, duration_limit=3, include_intro=False)
     assert output.is_file() and output.stat().st_size > 1_000
     with Ledger(db) as ledger:
         ledger.record(first[0].song_id, output)
         assert select_songs(songs, ledger.generated_ids(), 1)[0].song_id == "fixture-song-002"
-    # Decode both streams to ensure this is playable, not merely an MP4-named file.
-    subprocess.run(
-        [imageio_ffmpeg.get_ffmpeg_exe(), "-v", "error", "-i", str(output), "-f", "null", "-"],
+    ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+    probe = subprocess.run(
+        [ffmpeg, "-hide_banner", "-i", str(output), "-f", "null", "-"],
         capture_output=True, text=True, check=True,
     )
+    assert "Video: h264" in probe.stderr and "720x1280" in probe.stderr
+    assert "30 fps" in probe.stderr
+    assert "Audio: aac" in probe.stderr and "stereo" in probe.stderr
+    assert "Duration: 00:00:04.60" in probe.stderr
+    decoded_audio = subprocess.run(
+        [ffmpeg, "-v", "error", "-i", str(output), "-map", "0:a:0",
+         "-ac", "2", "-f", "s16le", "-"],
+        capture_output=True, check=True,
+    )
+    audio_samples = np.frombuffer(decoded_audio.stdout, dtype="<i2").astype(np.float64) / 32768
+    assert len(audio_samples) > 44_100 * 2
+    assert np.sqrt(np.mean(audio_samples**2)) > 0.08

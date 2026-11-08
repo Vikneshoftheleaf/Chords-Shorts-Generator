@@ -6,19 +6,47 @@ import argparse
 import sys
 from pathlib import Path
 
-from .pipeline import DatasetError, Ledger, generate_song, load_dataset, select_songs
+from .pipeline import (
+    DatasetError,
+    Ledger,
+    generate_song,
+    load_dataset,
+    output_filename,
+    select_songs,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="music-shorts",
-        description="Synthesize and render falling-note videos from Hooktheory gzip JSON.",
+        description="Synthesize and render vertical piano-study videos from Hooktheory gzip JSON.",
     )
     parser.add_argument("--dataset", type=Path, default=Path("dataset/Hooktheory.json.gz"))
     parser.add_argument("--output-dir", type=Path, default=Path("outputs"))
     parser.add_argument("--ledger", type=Path, default=Path("state/generated.sqlite3"))
-    parser.add_argument("--count", type=int, default=1, help="maximum new videos to generate (default: 1)")
-    parser.add_argument("--max-seconds", type=float, default=15.0, help="maximum excerpt duration (default: 15)")
+    parser.add_argument("--count", type=int, default=1, help="maximum videos to generate or refresh (default: 1)")
+    parser.add_argument(
+        "--max-seconds",
+        type=float,
+        default=60.0,
+        help="maximum piano progression duration (default: 60 seconds)",
+    )
+    parser.add_argument(
+        "--soundfont",
+        type=Path,
+        default=Path("assets/soundfonts/YDP-GrandPiano-SF2.tar.bz2"),
+        help="SF2 file or FreePats YDP Grand Piano .tar.bz2 archive",
+    )
+    parser.add_argument(
+        "--procedural-synth",
+        action="store_true",
+        help="use the built-in piano-style synth instead of FluidSynth/SF2",
+    )
+    parser.add_argument(
+        "--refresh",
+        action="store_true",
+        help="regenerate songs whose video already exists in the output directory",
+    )
     return parser
 
 
@@ -33,16 +61,26 @@ def main(argv: list[str] | None = None) -> int:
     try:
         songs = load_dataset(args.dataset)
         with Ledger(args.ledger) as ledger:
-            selected = select_songs(songs, ledger.generated_ids(), args.count)
+            generated_ids = ledger.generated_ids()
+            if args.refresh:
+                songs_to_refresh = [
+                    song for song in songs if (args.output_dir / output_filename(song)).is_file()
+                ]
+                selected = select_songs(songs_to_refresh, set(), args.count)
+            else:
+                selected = select_songs(songs, generated_ids, args.count)
             if not selected:
                 if args.count == 0:
                     print("No songs requested (--count 0).")
+                elif args.refresh:
+                    print("No existing videos found to refresh.")
                 else:
                     print("No eligible songs; all valid songs are already in the ledger.")
                 return 0
             for song in selected:
-                output = generate_song(song, args.output_dir, args.max_seconds)
-                ledger.record(song.song_id, output)
+                soundfont = None if args.procedural_synth else args.soundfont
+                output = generate_song(song, args.output_dir, args.max_seconds, soundfont=soundfont)
+                ledger.record(song.song_id, output, replace_existing=args.refresh)
                 print(f"Generated {output} (song ID {song.song_id})")
     except (DatasetError, OSError, RuntimeError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)

@@ -5,13 +5,14 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "music-shorts"
 version = "0.1.0"
-description = "Fixture-backed CLI for synthesizing short falling-note music videos"
+description = "Generate narrated piano chord-progression Shorts with Piper TTS"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "imageio-ffmpeg>=0.5,<1",
     "numpy>=1.26,<3",
     "Pillow>=10,<13",
+    "piper-tts>=1.3,<2",
 ]
 
 [project.optional-dependencies]
