@@ -1,0 +1,25 @@
+{
+  "songs": [
+    {
+      "id": "fixture-song-001",
+      "title": "Original Fixture Theme",
+      "tempo": 96,
+      "chords": [
+        {"start": 0.0, "duration": 0.8, "notes": [48, 55, 60, 64]},
+        {"start": 0.8, "duration": 0.8, "notes": [45, 52, 57, 60]}
+      ],
+      "melody": [
+        {"start": 0.1, "duration": 0.35, "pitch": 72},
+        {"start": 0.55, "duration": 0.4, "pitch": 76},
+        {"start": 1.0, "duration": 0.45, "pitch": 79}
+      ]
+    },
+    {
+      "id": "fixture-song-002",
+      "title": "Second Original Fixture",
+      "tempo": 110,
+      "chords": [{"start": 0.0, "duration": 1.0, "notes": [50, 57, 62]}],
+      "melody": [{"start": 0.2, "duration": 0.5, "pitch": 74}]
+    }
+  ]
+}
