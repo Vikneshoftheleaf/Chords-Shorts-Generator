@@ -2,7 +2,7 @@ name: Generate and publish music shorts
 
 on:
   schedule:
-    - cron: "4 * * * *"
+    - cron: "43 * * * *"
   workflow_dispatch:
 
 permissions:
