@@ -107,7 +107,7 @@ jobs:
         run: |
           printf 'UPLOAD\n' | music-shorts-publish \
             --video "$VIDEO_PATH" \
-            --song-id "$SONG_ID" \
+            --song-id="$SONG_ID" \
             --privacy-status public
       - name: Commit duplicate-prevention ledger
         if: success() && steps.generate.outputs.publish == 'true'
