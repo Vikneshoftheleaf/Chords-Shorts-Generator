@@ -1,10 +1,10 @@
 # Music Shorts
 
-A Python CLI worker that deterministically selects songs, synthesizes stereo sampled-piano chord/melody audio, and renders vertical 9:16 piano-roll videos. Each video opens on a dimmed piano-roll background with glowing cartoon cover art, comic-style track details, and phrase-by-phrase Piper voice captions. The voice is slowed slightly; after it ends, the video uses a one-second pause that fades smoothly into the chord progression. The progression ends with the final chord; a reference-inspired like/comment/share row and subscribe button hold over the piano roll for three seconds before the video ends. Comic lettering is used throughout. There is no YouTube integration or automatic posting.
+A Python CLI worker that deterministically selects songs, synthesizes stereo sampled-piano chord/melody audio, and renders vertical 9:16 piano-roll videos. Each video opens on a dimmed piano-roll background with glowing cartoon cover art, comic-style track details, and phrase-by-phrase Piper voice captions. The voice is slowed slightly; after it ends, the video uses a one-second pause that fades smoothly into the chord progression. The progression ends with the final chord; a reference-inspired like/comment/share row and subscribe button hold over the piano roll for three seconds before the video ends. Comic lettering is used throughout. A separate, manually invoked command creates a deterministic YouTube title and tags, drafts only the description with Cloudflare Workers AI, and uploads a selected video after explicit confirmation; uploads are never automatic.
 
 ## Dataset format and rights
 
-`dataset/Hooktheory.json.gz` is the 20 MB Hooktheory archive from [Sheet Sage Data](https://github.com/chrisdonahue/sheetsage-data). It contains native records with beat-aligned `melody` and `harmony` annotations. The CLI uses the refined alignment when available, falls back to user alignment, and skips records without both annotation tracks and usable timing anchors. It converts beat positions to seconds and synthesizes notes; it does not use or download the referenced YouTube audio.
+Generation defaults to `dataset/hooktheory_billboard_filtered.json`, a curated 1,623-record subset focused on popular songs. It contains native Hooktheory records with beat-aligned `melody` and `harmony` annotations. The CLI uses the refined alignment when available, falls back to user alignment, and skips records without both annotation tracks and usable timing anchors. It converts beat positions to seconds and synthesizes notes; it does not use or download the referenced YouTube audio. The larger `dataset/Hooktheory.json.gz` archive remains available as an alternative dataset.
 
 The Sheet Sage repository's [licensing notes](https://github.com/chrisdonahue/sheetsage#licensing-considerations) state that its dataset is CC BY-NC-SA 3.0. The user reports having separate written permission covering the intended commercial/monetized use. Keep that permission available and confirm it covers both redistribution of the archive and publication of derived videos.
 
@@ -43,8 +43,41 @@ Requires Python 3.10+, Piper TTS, and FFmpeg (supplied through the `imageio-ffmp
 ```sh
 python -m pip install -e ".[test]"
 pytest
-music-shorts --dataset dataset/Hooktheory.json.gz --count 1
+music-shorts --count 1
 ```
+
+The loader accepts plain JSON or gzip-compressed JSON. To use the full archive instead, pass `--dataset dataset/Hooktheory.json.gz`.
+
+## Manual YouTube publishing
+
+`music-shorts-publish` hard-codes the title as `Track Name (Artist Name) Chord Progression` and builds tags from the track metadata; Cloudflare Workers AI writes only the description using the selected track's artist/title, tempo, duration, a bounded chord sequence, and a short melody summary as context. It does not send the video or full dataset to Cloudflare. It previews the title, description, and tags, then uploads only if you type `UPLOAD`. The default visibility is **public**; choose `--privacy-status private` or `--privacy-status unlisted` to change it. After a successful YouTube upload, the local MP4 is deleted. If copy generation, confirmation, or upload fails, the MP4 remains available to retry.
+
+Before running:
+
+1. Enable the YouTube Data API v3 in a Google Cloud project and create an OAuth client ID for a **Desktop app**. Copy its **Client ID** and **Client secret** strings into `.env`; there is no Google OAuth JSON file path. On the first local upload, a browser opens for channel authorization; the refresh token is cached in the ignored local file `state/youtube-token.json`.
+2. Create a Cloudflare API token with Workers AI access and add the credentials to `.env`:
+
+```dotenv
+CLOUDFLARE_ACCOUNT_ID=your-account-id
+CLOUDFLARE_API_TOKEN=your-workers-ai-token
+YOUTUBE_CLIENT_ID=your-google-oauth-client-id
+YOUTUBE_CLIENT_SECRET=your-google-oauth-client-secret
+# Optional for non-interactive use after OAuth has been completed once:
+YOUTUBE_REFRESH_TOKEN=
+# Optional:
+CLOUDFLARE_AI_MODEL=@cf/meta/llama-3.1-8b-instruct
+```
+
+`.env` is ignored by Git. Existing shell environment variables take precedence; use `--env-file PATH` to load a different file.
+
+For GitHub Actions, add `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN`, `YOUTUBE_CLIENT_ID`, and `YOUTUBE_CLIENT_SECRET` as repository Actions secrets. For a non-interactive upload workflow, also add `YOUTUBE_REFRESH_TOKEN`; the publisher uses it to authorize without launching a browser. GitHub Actions secrets are only available inside workflows that explicitly map them to environment variables; this local CLI cannot read repository secrets directly. Never commit `.env`, the OAuth token cache, or secret values.
+3. Generate a video, then associate its dataset song ID and video path:
+
+```powershell
+music-shorts-publish --video outputs\VIDEO.mp4 --song-id SONG_ID
+```
+
+The command requires `--video` and `--song-id`; it checks that the video's generated filename matches that dataset song ID. You can override the dataset and visibility with `--dataset PATH` and `--privacy-status private|unlisted|public`. Review the preview and confirmation carefully before authorizing a public upload. YouTube API quota and Google OAuth consent/testing settings apply.
 
 To test the full generation pipeline against the real dataset and keep a preview in `outputs/` without modifying the normal ledger:
 
@@ -62,7 +95,7 @@ music-shorts [--dataset PATH] [--output-dir PATH] [--ledger PATH]
              [--procedural-synth] [--refresh]
 ```
 
-Generated MP4s are 720×1280 (9:16), 30 fps, and include AAC stereo narration followed by piano audio. The intro uses the piano-roll frame as its background, a glowing cover image, and timed phrase captions without text panels. A one-second pause and smooth fade lead into the progression. The piano section is cut at the final chord (or the configured 60-second piano maximum); the final three-second outro blurs and dims the piano-roll backdrop behind crisp, supersampled CTA icons, white labels, and a red subscribe button. Total video duration includes the narration, transition, and outro in addition to the piano maximum. Horizontal melody and chord bars move across a pitch grid toward the keyboard, with a single comic-style chord-name caption while a chord is active. Video goes to `outputs/`; the persistent SQLite duplicate ledger defaults to `state/generated.sqlite3`. The CLI only writes an ID to the ledger after its video renders successfully. Keep repository size in mind because videos are binary files.
+Generated MP4s are 720×1280 (9:16), 30 fps, and include AAC stereo narration followed by piano audio. The intro uses the piano-roll frame as its background, a glowing cover image, and timed phrase captions without text panels. A one-second pause and smooth fade lead into the progression. The piano section is cut at the final chord (or the configured 60-second piano maximum); the final three-second outro blurs and dims the piano-roll backdrop behind crisp, supersampled CTA icons, white labels, and a red subscribe button. Total video duration includes the narration, transition, and outro in addition to the piano maximum. Horizontal melody and chord bars move across a pitch grid toward the keyboard, with a single comic-style chord-name caption while a chord is active. Video goes to `outputs/`; only one pending MP4 is kept there. A failed/cancelled upload leaves it available for retry; the next generator run removes older MP4s and refuses to replace the remaining pending video. After successful publishing, the publisher removes it. To generate another song, publish the pending video or manually remove it first. Generation accepts `--count 0` or `--count 1` so it does not discard unposted videos in a batch. The persistent SQLite duplicate ledger defaults to `state/generated.sqlite3`; it records song IDs after their videos render successfully.
 
 To replace existing videos in `outputs/` with the current vertical visuals and audio, use:
 
@@ -70,10 +103,10 @@ To replace existing videos in `outputs/` with the current vertical visuals and a
 music-shorts --refresh --count 100
 ```
 
-`--refresh` only selects songs whose MP4 already exists and updates their existing ledger records; it does not select additional songs.
+`--refresh` only selects songs whose MP4 already exists and updates their existing ledger records; it does not select additional songs. It intentionally replaces the existing MP4, so use it only when you want to replace the pending video.
 
 ## GitHub Actions
 
 `.github/workflows/generate.yml` runs hourly at minute 0 (24 scheduled runs per day) and can also be started manually; both modes generate one video by default. Scheduled runs use the default branch. GitHub Actions scheduled events use UTC and can be delayed during high load, so hourly execution is best-effort rather than an exact-time guarantee. Before use, add this project to a GitHub repository and enable **Settings → Actions → General → Workflow permissions → Read and write permissions**. The workflow only requests `contents: write`, serializes runs per branch, and pushes to the checked-out branch. YouTube secrets and cloud services are not used.
 
-The real dataset is included, so the default CLI can generate a video locally. The first run may take longer because the archive contains more than 26,000 source records. Generated previews are stored in `outputs/` and their song IDs are recorded in `state/generated.sqlite3`; use the synthetic fixture in `tests/` for fast, repeatable tests.
+The popular-song dataset is included, so the default CLI can generate a video locally. Generated previews are stored in `outputs/` and their song IDs are recorded in `state/generated.sqlite3`; use the synthetic fixture in `tests/` for fast, repeatable tests.

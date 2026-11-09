@@ -3,6 +3,7 @@ from __future__ import annotations
 import gzip
 import io
 import json
+import os
 import shutil
 import sqlite3
 import subprocess
@@ -33,6 +34,7 @@ from music_shorts.pipeline import (
     _render_frame,
     _synthesize_intro,
     generate_song,
+    keep_latest_video,
     NoteEvent,
     parse_dataset_bytes,
     _chord_name,
@@ -70,7 +72,8 @@ def test_parses_native_hooktheory_annotations_and_alignment():
             },
         }
     }
-    songs = parse_dataset_bytes(gzip.compress(json.dumps(document).encode()))
+    raw = json.dumps(document).encode()
+    songs = parse_dataset_bytes(raw)
 
     assert len(songs) == 1
     song = songs[0]
@@ -84,6 +87,7 @@ def test_parses_native_hooktheory_annotations_and_alignment():
     assert song.melody[0].duration == pytest.approx(0.5)
     assert song.chords[0].notes == (48, 52, 55)
     assert song.chords[0].duration == pytest.approx(1.0)
+    assert parse_dataset_bytes(gzip.compress(raw)) == songs
 
 
 @pytest.mark.parametrize(
@@ -114,6 +118,26 @@ def test_selection_is_deterministic_and_skips_recorded_ids():
     assert [s.song_id for s in select_songs(songs, {"fixture-song-001"}, 2)] == [
         "fixture-song-002"
     ]
+
+
+def test_keep_latest_video_removes_older_mp4s_only(tmp_path):
+    output_dir = tmp_path / "outputs"
+    output_dir.mkdir()
+    older = output_dir / "older.mp4"
+    latest = output_dir / "latest.mp4"
+    other_file = output_dir / "notes.txt"
+    older.write_bytes(b"older")
+    latest.write_bytes(b"latest")
+    other_file.write_text("keep", encoding="utf-8")
+    os.utime(older, ns=(1_000_000_000, 1_000_000_000))
+    os.utime(latest, ns=(2_000_000_000, 2_000_000_000))
+
+    kept = keep_latest_video(output_dir)
+
+    assert kept == latest
+    assert not older.exists()
+    assert latest.read_bytes() == b"latest"
+    assert other_file.read_text(encoding="utf-8") == "keep"
 
 
 def test_ledger_persists_duplicate_ids(tmp_path):

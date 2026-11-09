@@ -13,6 +13,9 @@ dependencies = [
     "numpy>=1.26,<3",
     "Pillow>=10,<13",
     "piper-tts>=1.3,<2",
+    "google-api-python-client>=2.100,<3",
+    "google-auth-oauthlib>=1.2,<2",
+    "python-dotenv>=1.0,<2",
 ]
 
 [project.optional-dependencies]
@@ -20,6 +23,7 @@ test = ["pytest>=8,<9"]
 
 [project.scripts]
 music-shorts = "music_shorts.cli:main"
+music-shorts-publish = "music_shorts.youtube_publish:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

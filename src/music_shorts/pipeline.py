@@ -287,23 +287,24 @@ def _parse_hooktheory_dataset(document: dict[str, Any]) -> list[Song]:
 
 
 def parse_dataset_bytes(raw: bytes) -> list[Song]:
-    """Parse the normalized fixture format or the native Sheet Sage Hooktheory export."""
-    if not raw.startswith(b"\x1f\x8b"):
+    """Parse normalized or native Hooktheory JSON, optionally compressed with gzip."""
+    if raw.startswith(b"\x1f\x8b"):
+        try:
+            decoded = gzip.decompress(raw)
+        except (OSError, EOFError, zlib.error) as exc:
+            raise DatasetError(f"Could not decompress gzip dataset: {exc}") from exc
+    else:
         preview = raw[:100].decode("utf-8", errors="replace").strip()
         if preview.lower().startswith(("<!doctype html", "<html")) or "504 Gateway" in preview:
             raise DatasetError(
-                "Dataset is an HTML gateway/error response, not gzip data. "
-                "Replace dataset/Hooktheory.json.gz with a verified gzip JSON export."
+                "Dataset is an HTML gateway/error response, not JSON. "
+                "Provide a verified JSON or gzip JSON dataset."
             )
-        raise DatasetError("Dataset is not gzip data (missing gzip file signature).")
-    try:
-        decoded = gzip.decompress(raw)
-    except (OSError, EOFError, zlib.error) as exc:
-        raise DatasetError(f"Could not decompress gzip dataset: {exc}") from exc
+        decoded = raw
     try:
         document = json.loads(decoded)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise DatasetError(f"Decompressed dataset is not valid UTF-8 JSON: {exc}") from exc
+        raise DatasetError(f"Dataset is not valid UTF-8 JSON: {exc}") from exc
     if not isinstance(document, dict):
         raise DatasetError("Unsupported dataset schema: expected a JSON object.")
     if isinstance(document.get("songs"), list):
@@ -1725,6 +1726,20 @@ def output_filename(song: Song) -> str:
     readable = readable.strip("-_")[:48] or "song"
     digest = hashlib.sha256(song.song_id.encode("utf-8")).hexdigest()[:10]
     return f"{readable}-{digest}.mp4"
+
+
+def keep_latest_video(output_dir: Path) -> Path | None:
+    """Keep the newest top-level MP4 in an output directory and remove older ones."""
+    if not output_dir.exists():
+        return None
+    videos = list(output_dir.glob("*.mp4"))
+    if not videos:
+        return None
+    latest = max(videos, key=lambda path: (path.stat().st_mtime_ns, path.name))
+    for video in videos:
+        if video != latest:
+            video.unlink()
+    return latest
 
 
 def generate_song(

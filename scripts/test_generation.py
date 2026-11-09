@@ -1,4 +1,4 @@
-"""Generate and validate a video in outputs/ using the real dataset."""
+"""Generate and validate a video in outputs/ using the popular-song dataset."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ import imageio_ffmpeg
 from music_shorts.pipeline import (
     Ledger,
     generate_song,
+    keep_latest_video,
     load_dataset,
     output_filename,
     select_songs,
@@ -27,8 +28,8 @@ def main() -> int:
     parser.add_argument(
         "--dataset",
         type=Path,
-        default=ROOT / "dataset" / "Hooktheory.json.gz",
-        help="path to the Hooktheory gzip JSON dataset",
+        default=ROOT / "dataset" / "hooktheory_billboard_filtered.json",
+        help="path to a Hooktheory JSON or gzip JSON dataset",
     )
     parser.add_argument(
         "--seconds",
@@ -60,6 +61,12 @@ def main() -> int:
     try:
         songs = load_dataset(args.dataset)
         args.output_dir.mkdir(parents=True, exist_ok=True)
+        pending_video = keep_latest_video(args.output_dir)
+        if pending_video is not None:
+            raise RuntimeError(
+                f"A video is waiting in {pending_video}. Publish it successfully to remove it, "
+                "or remove it manually before generating another."
+            )
         available_songs = [
             song
             for song in songs
