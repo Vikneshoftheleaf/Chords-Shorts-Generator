@@ -5,3 +5,6 @@ build/
 dist/
 *.py[cod]
 *.egg-info/
+.env
+secrets/
+state/youtube-token.json

@@ -10,6 +10,7 @@ from .pipeline import (
     DatasetError,
     Ledger,
     generate_song,
+    keep_latest_video,
     load_dataset,
     output_filename,
     select_songs,
@@ -19,12 +20,21 @@ from .pipeline import (
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="music-shorts",
-        description="Synthesize and render vertical piano-study videos from Hooktheory gzip JSON.",
+        description="Synthesize and render vertical piano-study videos from Hooktheory JSON.",
     )
-    parser.add_argument("--dataset", type=Path, default=Path("dataset/Hooktheory.json.gz"))
+    parser.add_argument(
+        "--dataset",
+        type=Path,
+        default=Path("dataset/hooktheory_billboard_filtered.json"),
+    )
     parser.add_argument("--output-dir", type=Path, default=Path("outputs"))
     parser.add_argument("--ledger", type=Path, default=Path("state/generated.sqlite3"))
-    parser.add_argument("--count", type=int, default=1, help="maximum videos to generate or refresh (default: 1)")
+    parser.add_argument(
+        "--count",
+        type=int,
+        default=1,
+        help="number of videos to generate or refresh (0 or 1; upload before generating the next)",
+    )
     parser.add_argument(
         "--max-seconds",
         type=float,
@@ -52,14 +62,23 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    if args.count < 0:
-        print("error: --count must be zero or greater", file=sys.stderr)
+    if args.count not in (0, 1):
+        print("error: --count must be zero or one; publish the pending video before generating another", file=sys.stderr)
         return 2
     if not 0 < args.max_seconds <= 60:
         print("error: --max-seconds must be greater than 0 and at most 60", file=sys.stderr)
         return 2
     try:
+        if args.count == 0:
+            print("No songs requested (--count 0).")
+            return 0
         songs = load_dataset(args.dataset)
+        pending_video = keep_latest_video(args.output_dir)
+        if pending_video is not None and not args.refresh:
+            raise RuntimeError(
+                f"A video is waiting in {pending_video}. Publish it successfully to remove it, "
+                "or remove it manually before generating another."
+            )
         with Ledger(args.ledger) as ledger:
             generated_ids = ledger.generated_ids()
             if args.refresh:
