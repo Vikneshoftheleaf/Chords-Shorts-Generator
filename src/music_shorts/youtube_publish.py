@@ -297,8 +297,23 @@ def _youtube_service(
                 scopes=YOUTUBE_SCOPES,
             )
         if credentials and credentials.refresh_token and not credentials.valid:
-            credentials.refresh(Request())
+            try:
+                credentials.refresh(Request())
+            except GoogleAuthError as exc:
+                if refresh_token.strip():
+                    raise RuntimeError(
+                        "The configured YOUTUBE_REFRESH_TOKEN was rejected. Create a "
+                        "new refresh token authorized for both youtube.upload and "
+                        "youtube.readonly, then replace the GitHub Actions secret."
+                    ) from exc
+                raise
         if not credentials or not credentials.valid:
+            if refresh_token.strip():
+                raise RuntimeError(
+                    "The configured YOUTUBE_REFRESH_TOKEN did not produce valid "
+                    "YouTube credentials; interactive authorization is disabled "
+                    "when a refresh token is configured."
+                )
             flow = InstalledAppFlow.from_client_config(
                 {
                     "installed": {
@@ -523,6 +538,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=Path(".env"),
         help="environment file to load (default: .env; existing environment takes precedence)",
     )
+    parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="skip interactive upload or thumbnail confirmation (for trusted automation)",
+    )
     return parser
 
 
@@ -563,14 +583,15 @@ def main(argv: list[str] | None = None) -> int:
             )
         if args.thumbnail_for:
             print(f"\nSet the first frame as thumbnail for video {args.thumbnail_for}.")
-            try:
-                confirmation = input("Type THUMBNAIL to continue: ")
-            except EOFError:
-                print("Thumbnail update cancelled.")
-                return 0
-            if confirmation.strip() != "THUMBNAIL":
-                print("Thumbnail update cancelled.")
-                return 0
+            if not args.yes:
+                try:
+                    confirmation = input("Type THUMBNAIL to continue: ")
+                except EOFError:
+                    print("Thumbnail update cancelled.")
+                    return 0
+                if confirmation.strip() != "THUMBNAIL":
+                    print("Thumbnail update cancelled.")
+                    return 0
             set_existing_video_thumbnail(
                 args.thumbnail_for,
                 args.video,
@@ -597,14 +618,15 @@ def main(argv: list[str] | None = None) -> int:
         print(f"\nDescription:\n{metadata.description}")
         print(f"\nTags: {', '.join(metadata.tags)}")
         print(f"\nThe video will be uploaded as {args.privacy_status.upper()}.")
-        try:
-            confirmation = input("Type UPLOAD to authorize the YouTube upload: ")
-        except EOFError:
-            print("Upload cancelled; no YouTube upload was made.")
-            return 0
-        if confirmation.strip() != "UPLOAD":
-            print("Upload cancelled; no YouTube upload was made.")
-            return 0
+        if not args.yes:
+            try:
+                confirmation = input("Type UPLOAD to authorize the YouTube upload: ")
+            except EOFError:
+                print("Upload cancelled; no YouTube upload was made.")
+                return 0
+            if confirmation.strip() != "UPLOAD":
+                print("Upload cancelled; no YouTube upload was made.")
+                return 0
         video_id = upload_video(
             args.video,
             metadata,

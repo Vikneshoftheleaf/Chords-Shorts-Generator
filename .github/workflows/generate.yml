@@ -105,7 +105,8 @@ jobs:
           SONG_ID: ${{ steps.generate.outputs.song_id }}
         shell: bash
         run: |
-          printf 'UPLOAD\n' | music-shorts-publish \
+          music-shorts-publish \
+            --yes \
             --video "$VIDEO_PATH" \
             --song-id="$SONG_ID" \
             --privacy-status public

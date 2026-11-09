@@ -466,6 +466,38 @@ def test_upload_reauthorizes_cached_token_when_required(
     assert warning in capsys.readouterr().err
 
 
+def test_refresh_token_failure_does_not_start_interactive_oauth(monkeypatch, tmp_path):
+    import google.auth.exceptions
+    import google.oauth2.credentials
+    import google_auth_oauthlib.flow
+
+    import music_shorts.youtube_publish as publishing
+
+    class FakeCredentials:
+        def __init__(self, **_kwargs):
+            self.valid = False
+            self.refresh_token = "configured-refresh-token"
+
+        def refresh(self, _request):
+            raise google.auth.exceptions.RefreshError("invalid_scope")
+
+    class FakeFlow:
+        @classmethod
+        def from_client_config(cls, *_args, **_kwargs):
+            pytest.fail("configured refresh-token failures must not open browser OAuth")
+
+    monkeypatch.setattr(google.oauth2.credentials, "Credentials", FakeCredentials)
+    monkeypatch.setattr(google_auth_oauthlib.flow, "InstalledAppFlow", FakeFlow)
+
+    with pytest.raises(RuntimeError, match="authorized for both youtube.upload and youtube.readonly"):
+        publishing._youtube_service(
+            "client-id",
+            "client-secret",
+            tmp_path / "missing-token.json",
+            "configured-refresh-token",
+        )
+
+
 def test_youtube_title_uses_exact_track_artist_and_literal_chord_progression():
     song = Song(
         song_id="title-song",
@@ -704,7 +736,7 @@ def test_main_upload_requires_exact_confirmation(tmp_path, monkeypatch):
     assert not video_path.exists()
 
 
-def test_main_uses_metadata_fallback_when_cloudflare_returns_invalid_text(
+def test_main_yes_skips_confirmation_and_uses_metadata_fallback(
     tmp_path, monkeypatch, capsys
 ):
     import music_shorts.youtube_publish as publishing
@@ -741,7 +773,10 @@ def test_main_uses_metadata_fallback_when_cloudflare_returns_invalid_text(
             RuntimeError("Cloudflare AI response did not contain a JSON object.")
         ),
     )
-    monkeypatch.setattr("builtins.input", lambda _prompt: "UPLOAD")
+    monkeypatch.setattr(
+        "builtins.input",
+        lambda _prompt: pytest.fail("--yes must skip interactive confirmation"),
+    )
     captured = {}
 
     def fake_upload(_path, metadata, *_args):
@@ -760,6 +795,7 @@ def test_main_uses_metadata_fallback_when_cloudflare_returns_invalid_text(
             str(dataset_path),
             "--privacy-status",
             "private",
+            "--yes",
         ]
     )
 
