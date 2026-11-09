@@ -2,7 +2,7 @@ name: Generate and publish music shorts
 
 on:
   schedule:
-    - cron: "43 * * * *"
+    - cron: "0 * * * *"
   workflow_dispatch:
 
 permissions:
@@ -10,7 +10,8 @@ permissions:
 
 concurrency:
   group: music-shorts-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
+  
 
 jobs:
   publish:
