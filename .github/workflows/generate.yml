@@ -9,6 +9,7 @@ permissions:
 concurrency:
   group: music-shorts-${{ github.ref }}
   cancel-in-progress: false
+  
 
 jobs:
   publish:
