@@ -324,15 +324,33 @@ def load_dataset(path: Path) -> list[Song]:
     return parse_dataset_bytes(raw)
 
 
-def select_songs(songs: Iterable[Song], already_generated: set[str], count: int) -> list[Song]:
-    """Choose the lexicographically first ungenerated IDs, regardless of source order."""
+def select_songs(
+    songs: Iterable[Song],
+    already_generated: set[str],
+    count: int,
+    *,
+    already_generated_keys: set[str] | None = None,
+) -> list[Song]:
+    """Choose the lexicographically first songs not already generated, regardless of source order."""
     if count < 0:
         raise ValueError("count must not be negative.")
-    return [
-        song
-        for song in sorted(songs, key=lambda entry: entry.song_id)
-        if song.song_id not in already_generated
-    ][:count]
+    if count == 0:
+        return []
+    ordered_songs = sorted(songs, key=lambda entry: entry.song_id)
+    generated_keys = set(already_generated_keys or ())
+    generated_keys.update(
+        _song_identity_key(song) for song in ordered_songs if song.song_id in already_generated
+    )
+    selected: list[Song] = []
+    for song in ordered_songs:
+        identity_key = _song_identity_key(song)
+        if song.song_id in already_generated or identity_key in generated_keys:
+            continue
+        selected.append(song)
+        generated_keys.add(identity_key)
+        if len(selected) == count:
+            break
+    return selected
 
 
 class Ledger:
@@ -347,30 +365,52 @@ class Ledger:
             CREATE TABLE IF NOT EXISTS generated (
                 song_id TEXT PRIMARY KEY,
                 output_path TEXT NOT NULL,
+                identity_key TEXT,
                 generated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
             )
             """
         )
+        columns = {
+            row[1] for row in self.connection.execute("PRAGMA table_info(generated)")
+        }
+        if "identity_key" not in columns:
+            self.connection.execute("ALTER TABLE generated ADD COLUMN identity_key TEXT")
         self.connection.commit()
 
     def generated_ids(self) -> set[str]:
         return {row[0] for row in self.connection.execute("SELECT song_id FROM generated")}
 
-    def record(self, song_id: str, output_path: Path, *, replace_existing: bool = False) -> None:
+    def generated_identity_keys(self) -> set[str]:
+        return {
+            row[0]
+            for row in self.connection.execute(
+                "SELECT identity_key FROM generated WHERE identity_key IS NOT NULL"
+            )
+        }
+
+    def record(
+        self,
+        song_id: str,
+        output_path: Path,
+        *,
+        identity_key: str | None = None,
+        replace_existing: bool = False,
+    ) -> None:
         if replace_existing:
             self.connection.execute(
                 """
-                INSERT INTO generated(song_id, output_path) VALUES (?, ?)
+                INSERT INTO generated(song_id, output_path, identity_key) VALUES (?, ?, ?)
                 ON CONFLICT(song_id) DO UPDATE SET
                     output_path = excluded.output_path,
+                    identity_key = excluded.identity_key,
                     generated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
                 """,
-                (song_id, output_path.as_posix()),
+                (song_id, output_path.as_posix(), identity_key),
             )
         else:
             self.connection.execute(
-                "INSERT INTO generated(song_id, output_path) VALUES (?, ?)",
-                (song_id, output_path.as_posix()),
+                "INSERT INTO generated(song_id, output_path, identity_key) VALUES (?, ?, ?)",
+                (song_id, output_path.as_posix(), identity_key),
             )
         self.connection.commit()
 
@@ -953,6 +993,17 @@ def _format_display_name(value: str, *, artist: bool = False) -> str:
 def _normalize_music_name(value: str) -> str:
     normalized = unicodedata.normalize("NFKD", value).casefold()
     return "".join(character for character in normalized if character.isalnum())
+
+
+def _song_identity_key(song: Song) -> str:
+    artist, track_name = _music_metadata(song)
+    normalized_track = _normalize_music_name(track_name)
+    normalized_artist = _normalize_music_name(artist)
+    if normalized_track and normalized_artist:
+        return f"artist:{normalized_artist}:track:{normalized_track}"
+    if normalized_track:
+        return f"track:{normalized_track}"
+    return f"id:{song.song_id}"
 
 
 def _lookup_itunes_artwork(song: Song) -> TrackArtwork | None:
@@ -1630,7 +1681,9 @@ def render_video(
         outro_frame = _render_outro_frame(last_progression_frame)
         for frame in range(frame_count):
             now = frame / FPS
-            if intro_base_frame is not None and now < intro_duration:
+            if frame == 0 and intro_base_frame is not None:
+                image = intro_base_frame
+            elif intro_base_frame is not None and now < intro_duration:
                 active_cue = next(
                     (cue for cue in intro_cues if cue.start <= now < cue.end),
                     None,

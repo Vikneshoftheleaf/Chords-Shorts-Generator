@@ -32,7 +32,9 @@ from music_shorts.pipeline import (
     _render_intro_frame,
     _render_outro_frame,
     _render_frame,
+    render_video,
     _synthesize_intro,
+    CaptionCue,
     generate_song,
     keep_latest_video,
     NoteEvent,
@@ -112,12 +114,31 @@ def test_rejects_invalid_note_pitch():
 
 def test_selection_is_deterministic_and_skips_recorded_ids():
     songs = list(reversed(fixture_songs()))
+    assert select_songs(songs, set(), 0) == []
     assert [s.song_id for s in select_songs(songs, set(), 2)] == [
         "fixture-song-001", "fixture-song-002"
     ]
     assert [s.song_id for s in select_songs(songs, {"fixture-song-001"}, 2)] == [
         "fixture-song-002"
     ]
+
+
+def test_selection_skips_repeated_artist_and_track_across_song_ids():
+    chords, melody = fixture_songs()[0].chords, fixture_songs()[0].melody
+    songs = [
+        Song("song-001", "Artist - Track Name", 96, chords, melody, "Artist", "Track Name"),
+        Song("song-002", "Artist - Track-Name!", 96, chords, melody, "artist", "Track-Name!"),
+        Song("song-003", "Other Artist - Different Track", 96, chords, melody,
+             "Other Artist", "Different Track"),
+    ]
+
+    assert [song.song_id for song in select_songs(songs, set(), 3)] == [
+        "song-001",
+        "song-003",
+    ]
+    assert [song.song_id for song in select_songs(
+        songs, set(), 1, already_generated_keys={"artist:artist:track:trackname"}
+    )] == ["song-003"]
 
 
 def test_keep_latest_video_removes_older_mp4s_only(tmp_path):
@@ -161,6 +182,35 @@ def test_ledger_can_refresh_existing_video_metadata(tmp_path):
             ("fixture-song-001",),
         ).fetchone()
         assert row == ("outputs/refreshed.mp4",)
+
+
+def test_ledger_migrates_existing_database_and_persists_identity_key(tmp_path):
+    db = tmp_path / "ledger.sqlite3"
+    connection = sqlite3.connect(db)
+    connection.execute(
+        """
+        CREATE TABLE generated (
+            song_id TEXT PRIMARY KEY,
+            output_path TEXT NOT NULL,
+            generated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+        )
+        """
+    )
+    connection.execute(
+        "INSERT INTO generated(song_id, output_path) VALUES (?, ?)",
+        ("previous-song", "outputs/previous.mp4"),
+    )
+    connection.commit()
+    connection.close()
+
+    with Ledger(db) as ledger:
+        assert ledger.generated_ids() == {"previous-song"}
+        ledger.record(
+            "new-song",
+            Path("outputs/new.mp4"),
+            identity_key="artist:artist:track:newtrack",
+        )
+        assert ledger.generated_identity_keys() == {"artist:artist:track:newtrack"}
 
 
 def test_piano_synthesis_is_stereo_audible_and_has_smooth_attack(tmp_path):
@@ -375,6 +425,74 @@ def test_intro_and_outro_frames_include_requested_content():
     assert outro.size == (720, 1280)
     assert np.asarray(intro).tobytes() != np.asarray(progression).tobytes()
     assert np.asarray(outro).tobytes() != np.asarray(progression).tobytes()
+
+
+def test_video_starts_with_clean_intro_card_for_thumbnail(tmp_path, monkeypatch):
+    import music_shorts.pipeline as pipeline
+
+    song = fixture_songs()[0]
+    artwork = TrackArtwork(
+        Image.new("RGB", (200, 200), "#5790c0"),
+        "Sample Artist",
+        "Sample Title",
+    )
+    progression_frame = Image.new("RGB", (720, 1280), "#345678")
+    monkeypatch.setattr(pipeline, "_render_frame", lambda *_args: progression_frame)
+    monkeypatch.setattr(pipeline, "_render_outro_frame", lambda image: image)
+
+    audio_source = tmp_path / "source.wav"
+    audio_destination = tmp_path / "mixed.wav"
+    audio_duration = 0.1 + pipeline.INTRO_PAUSE_SECONDS + 0.1 + pipeline.OUTRO_SECONDS
+    with wave.open(str(audio_source), "wb") as audio:
+        audio.setnchannels(2)
+        audio.setsampwidth(2)
+        audio.setframerate(44_100)
+        audio.writeframes(bytes(round(audio_duration * 44_100) * 4))
+
+    def fake_mix(_piano, destination, duration, _intro, intro_duration, pause):
+        shutil.copyfile(audio_source, destination)
+        return intro_duration + pause + duration + pipeline.OUTRO_SECONDS
+
+    monkeypatch.setattr(pipeline, "_mix_intro_and_piano_audio", fake_mix)
+    video_path = tmp_path / "intro.mp4"
+    render_video(
+        song,
+        audio_source,
+        video_path,
+        0.1,
+        artwork,
+        intro_audio_path=audio_source,
+        intro_duration=0.1,
+        intro_cues=(CaptionCue("Intro caption", 0, 0.1),),
+    )
+
+    decoded = subprocess.run(
+        [
+            imageio_ffmpeg.get_ffmpeg_exe(),
+            "-v",
+            "error",
+            "-i",
+            str(video_path),
+            "-frames:v",
+            "1",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "rgb24",
+            "-",
+        ],
+        capture_output=True,
+        check=True,
+    )
+    actual = np.frombuffer(decoded.stdout, dtype=np.uint8).reshape((1280, 720, 3))
+    clean_intro = np.asarray(_render_intro_frame(progression_frame, artwork, None))
+    captioned_intro = np.asarray(
+        _render_intro_frame(progression_frame, artwork, "Intro caption")
+    )
+
+    assert np.abs(actual.astype(np.int16) - clean_intro.astype(np.int16)).mean() < np.abs(
+        actual.astype(np.int16) - captioned_intro.astype(np.int16)
+    ).mean()
 
 
 def test_intro_uses_faster_phrase_audio_and_matched_caption_cues(tmp_path, monkeypatch):

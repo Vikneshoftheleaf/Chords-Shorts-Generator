@@ -1,15 +1,9 @@
-name: Generate music shorts
+name: Generate and publish music shorts
 
 on:
   schedule:
     - cron: "0 * * * *"
   workflow_dispatch:
-    inputs:
-      count:
-        description: Maximum number of new videos to generate
-        required: true
-        default: "1"
-        type: string
 
 permissions:
   contents: write
@@ -19,14 +13,28 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  generate:
+  publish:
     runs-on: ubuntu-latest
     steps:
-      - name: Check out dispatch branch
+      - name: Check out workflow branch
         uses: actions/checkout@v4
         with:
           ref: ${{ github.ref_name }}
           fetch-depth: 0
+      - name: Verify publishing secrets are configured
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
+          YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
+          YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
+        shell: bash
+        run: |
+          test -n "$CLOUDFLARE_ACCOUNT_ID" || { echo "::error::Missing CLOUDFLARE_ACCOUNT_ID Actions secret"; exit 1; }
+          test -n "$CLOUDFLARE_API_TOKEN" || { echo "::error::Missing CLOUDFLARE_API_TOKEN Actions secret"; exit 1; }
+          test -n "$YOUTUBE_CLIENT_ID" || { echo "::error::Missing YOUTUBE_CLIENT_ID Actions secret"; exit 1; }
+          test -n "$YOUTUBE_CLIENT_SECRET" || { echo "::error::Missing YOUTUBE_CLIENT_SECRET Actions secret"; exit 1; }
+          test -n "$YOUTUBE_REFRESH_TOKEN" || { echo "::error::Missing YOUTUBE_REFRESH_TOKEN Actions secret"; exit 1; }
       - name: Install FluidSynth
         run: |
           sudo apt-get update
@@ -47,18 +55,70 @@ jobs:
         run: python -m pytest
       - name: Test Piper narration and YDP piano synthesis
         run: python scripts/test_generation.py --seconds 3 --output-dir "${RUNNER_TEMP}/soundfont-test"
-      - name: Generate videos
-        run: music-shorts --count "${{ github.event.inputs.count || '1' }}"
-      - name: Commit and push generated files if changed
+      - name: Generate full-length video
+        id: generate
         shell: bash
         run: |
-          mkdir -p outputs state
+          output_dir="${RUNNER_TEMP}/music-shorts-output"
+          mkdir -p "$output_dir"
+          music-shorts \
+            --count 1 \
+            --max-seconds 60 \
+            --output-dir "$output_dir" \
+            --ledger state/generated.sqlite3
+          python - "$output_dir" >> "$GITHUB_OUTPUT" <<'PY'
+          import sys
+          from pathlib import Path
+
+          from music_shorts.pipeline import load_dataset, output_filename
+
+          output_dir = Path(sys.argv[1])
+          videos = list(output_dir.glob("*.mp4"))
+          if not videos:
+              print("publish=false")
+              print("No eligible songs remain; nothing to publish.", file=sys.stderr)
+              raise SystemExit(0)
+          if len(videos) != 1:
+              raise SystemExit(f"Expected exactly one generated MP4, found {len(videos)}.")
+
+          video = videos[0].resolve()
+          songs = load_dataset(Path("dataset/hooktheory_billboard_filtered.json"))
+          matches = [song for song in songs if output_filename(song) == video.name]
+          if len(matches) != 1:
+              raise SystemExit(
+                  f"Could not uniquely map generated video {video.name} to a dataset song."
+              )
+
+          print("publish=true")
+          print(f"video={video}")
+          print(f"song_id={matches[0].song_id}")
+          PY
+      - name: Upload public Short and set first-frame thumbnail
+        if: steps.generate.outputs.publish == 'true'
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
+          YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
+          YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
+          VIDEO_PATH: ${{ steps.generate.outputs.video }}
+          SONG_ID: ${{ steps.generate.outputs.song_id }}
+        shell: bash
+        run: |
+          printf 'UPLOAD\n' | music-shorts-publish \
+            --video "$VIDEO_PATH" \
+            --song-id "$SONG_ID" \
+            --privacy-status public
+      - name: Commit duplicate-prevention ledger
+        if: success() && steps.generate.outputs.publish == 'true'
+        shell: bash
+        run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A -- outputs state
+          git add -- state/generated.sqlite3
           if git diff --cached --quiet; then
-            echo "No generated files or ledger changes to commit."
+            echo "No ledger changes to commit."
             exit 0
           fi
-          git commit -m "Generate music shorts"
+          git commit -m "Record published music short"
           git push origin "HEAD:${GITHUB_REF_NAME}"

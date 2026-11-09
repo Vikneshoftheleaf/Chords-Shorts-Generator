@@ -9,6 +9,7 @@ from pathlib import Path
 from .pipeline import (
     DatasetError,
     Ledger,
+    _song_identity_key,
     generate_song,
     keep_latest_video,
     load_dataset,
@@ -81,13 +82,19 @@ def main(argv: list[str] | None = None) -> int:
             )
         with Ledger(args.ledger) as ledger:
             generated_ids = ledger.generated_ids()
+            generated_identity_keys = ledger.generated_identity_keys()
             if args.refresh:
                 songs_to_refresh = [
                     song for song in songs if (args.output_dir / output_filename(song)).is_file()
                 ]
                 selected = select_songs(songs_to_refresh, set(), args.count)
             else:
-                selected = select_songs(songs, generated_ids, args.count)
+                selected = select_songs(
+                    songs,
+                    generated_ids,
+                    args.count,
+                    already_generated_keys=generated_identity_keys,
+                )
             if not selected:
                 if args.count == 0:
                     print("No songs requested (--count 0).")
@@ -99,7 +106,12 @@ def main(argv: list[str] | None = None) -> int:
             for song in selected:
                 soundfont = None if args.procedural_synth else args.soundfont
                 output = generate_song(song, args.output_dir, args.max_seconds, soundfont=soundfont)
-                ledger.record(song.song_id, output, replace_existing=args.refresh)
+                ledger.record(
+                    song.song_id,
+                    output,
+                    identity_key=_song_identity_key(song),
+                    replace_existing=args.refresh,
+                )
                 print(f"Generated {output} (song ID {song.song_id})")
     except (DatasetError, OSError, RuntimeError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
