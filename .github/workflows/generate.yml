@@ -113,6 +113,7 @@ jobs:
         if: success() && steps.generate.outputs.publish == 'true'
         shell: bash
         run: |
+          set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -- state/generated.sqlite3
@@ -121,4 +122,18 @@ jobs:
             exit 0
           fi
           git commit -m "Record published music short"
-          git push origin "HEAD:${GITHUB_REF_NAME}"
+          branch="${GITHUB_REF_NAME}"
+          for attempt in 1 2 3; do
+            git fetch origin "$branch"
+            if ! git rebase "origin/$branch"; then
+              git rebase --abort || true
+              echo "::error::Could not rebase the ledger commit onto origin/$branch."
+              exit 1
+            fi
+            if git push origin "HEAD:$branch"; then
+              exit 0
+            fi
+            echo "Push attempt $attempt failed; fetching the latest branch before retrying."
+          done
+          echo "::error::Could not push the ledger commit after 3 attempts."
+          exit 1
