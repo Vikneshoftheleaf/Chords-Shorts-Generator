@@ -36,8 +36,8 @@ jobs:
           test -n "$YOUTUBE_REFRESH_TOKEN" || { echo "::error::Missing YOUTUBE_REFRESH_TOKEN Actions secret"; exit 1; }
       - name: Install FluidSynth
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends fluidsynth
+          sudo apt-get -o Acquire::Retries=3 update
+          sudo apt-get -o Acquire::Retries=3 install -y --no-install-recommends fluidsynth
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
