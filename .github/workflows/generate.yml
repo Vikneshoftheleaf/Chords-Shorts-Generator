@@ -9,17 +9,17 @@ permissions:
 concurrency:
   group: music-shorts-${{ github.ref }}
   cancel-in-progress: false
+  
 
 jobs:
   publish:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     steps:
       - name: Check out workflow branch
         uses: actions/checkout@v4
         with:
           ref: ${{ github.ref_name }}
           fetch-depth: 0
-
       - name: Verify publishing secrets are configured
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
@@ -34,39 +34,26 @@ jobs:
           test -n "$YOUTUBE_CLIENT_ID" || { echo "::error::Missing YOUTUBE_CLIENT_ID Actions secret"; exit 1; }
           test -n "$YOUTUBE_CLIENT_SECRET" || { echo "::error::Missing YOUTUBE_CLIENT_SECRET Actions secret"; exit 1; }
           test -n "$YOUTUBE_REFRESH_TOKEN" || { echo "::error::Missing YOUTUBE_REFRESH_TOKEN Actions secret"; exit 1; }
-
       - name: Install FluidSynth
-        shell: bash
         run: |
-          export DEBIAN_FRONTEND=noninteractive
-          sudo apt-get update \
-            -o Acquire::Retries=5 \
-            -o Acquire::http::Timeout=30 \
-            -o Acquire::https::Timeout=30 \
-            -o Acquire::Queue-Mode=host
-          sudo apt-get install -y --no-install-recommends --fix-missing fluidsynth
-
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends fluidsynth
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: pip
-
       - name: Install worker and tests
         run: python -m pip install -e ".[test]"
-
       - name: Cache Piper voice model
         uses: actions/cache@v4
         with:
           path: ~/.cache/music-shorts/piper
           key: piper-en-US-norman-medium-v1.0.0
-
       - name: Test worker
         run: python -m pytest
-
       - name: Test Piper narration and YDP piano synthesis
         run: python scripts/test_generation.py --seconds 3 --output-dir "${RUNNER_TEMP}/soundfont-test"
-
       - name: Generate full-length video
         id: generate
         shell: bash
@@ -105,7 +92,6 @@ jobs:
           print(f"video={video}")
           print(f"song_id={matches[0].song_id}")
           PY
-
       - name: Upload public Short and set first-frame thumbnail
         if: steps.generate.outputs.publish == 'true'
         env:
@@ -123,7 +109,6 @@ jobs:
             --video "$VIDEO_PATH" \
             --song-id="$SONG_ID" \
             --privacy-status public
-
       - name: Commit duplicate-prevention ledger
         if: success() && steps.generate.outputs.publish == 'true'
         shell: bash
