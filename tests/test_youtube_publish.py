@@ -242,6 +242,57 @@ def test_publish_facebook_reel_uses_start_upload_and_finish_phases(
     assert [item[1] for item in requests] == [60, 300, 60]
 
 
+def test_validate_facebook_page_token_checks_configured_page(monkeypatch):
+    import urllib.parse
+
+    import music_shorts.youtube_publish as publishing
+
+    requests = []
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return json.dumps({"id": "page-123"}).encode()
+
+    def fake_urlopen(request, timeout):
+        requests.append((request, timeout))
+        return FakeResponse()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    publishing.validate_facebook_page_access_token("page-123", "page-token")
+
+    request, timeout = requests[0]
+    query = urllib.parse.parse_qs(urllib.parse.urlparse(request.full_url).query)
+    assert request.method == "GET"
+    assert query == {"fields": ["id"], "access_token": ["page-token"]}
+    assert timeout == 60
+
+
+def test_validate_facebook_page_token_rejects_a_different_page(monkeypatch):
+    import music_shorts.youtube_publish as publishing
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return json.dumps({"id": "another-page"}).encode()
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda *_args, **_kwargs: FakeResponse())
+
+    with pytest.raises(RuntimeError, match="different Page ID"):
+        publishing.validate_facebook_page_access_token("page-123", "page-token")
+
+
 def test_upload_closes_video_stream_after_success(tmp_path, monkeypatch):
     import google.oauth2.credentials
     import googleapiclient.discovery
@@ -783,8 +834,19 @@ def test_main_upload_requires_exact_confirmation(tmp_path, monkeypatch):
     )
     monkeypatch.setattr("builtins.input", lambda _prompt: "UPLOAD")
     captured = {}
+    events = []
+
+    def fake_facebook_preflight(page_id, access_token):
+        events.append("facebook-preflight")
+        assert page_id == "facebook-page-id"
+        assert access_token == "facebook-page-token"
+
+    monkeypatch.setattr(
+        publishing, "validate_facebook_page_access_token", fake_facebook_preflight
+    )
 
     def fake_upload(*args):
+        events.append("youtube-upload")
         captured["args"] = args
         return "youtube-id"
 
@@ -807,6 +869,7 @@ def test_main_upload_requires_exact_confirmation(tmp_path, monkeypatch):
     )
 
     assert result == 0
+    assert events == ["facebook-preflight", "youtube-upload"]
     expected_metadata = build_youtube_copy(song, "Piano arrangement")
     assert captured["args"][1] == expected_metadata
     assert captured["args"][2] == "public"

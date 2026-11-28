@@ -506,11 +506,12 @@ def upload_video(
 
 def _facebook_request(
     url: str,
-    data: bytes,
+    data: bytes | None,
     headers: dict[str, str],
     timeout: int = 60,
 ) -> dict[str, Any]:
-    request = urllib.request.Request(url, data=data, headers=headers, method="POST")
+    method = "POST" if data is not None else "GET"
+    request = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             result = json.loads(response.read())
@@ -533,6 +534,36 @@ def _facebook_request(
             f"Facebook API reported an error: {message if isinstance(message, str) else error}"
         )
     return result
+
+
+def validate_facebook_page_access_token(page_id: str, page_access_token: str) -> None:
+    page_id = page_id.strip()
+    if not page_id or not page_access_token.strip():
+        raise RuntimeError(
+            "Set FACEBOOK_PAGE_ID and FACEBOOK_PAGE_ACCESS_TOKEN to publish a Reel."
+        )
+
+    page_url = (
+        f"https://graph.facebook.com/{FACEBOOK_GRAPH_API_VERSION}/"
+        f"{urllib.parse.quote(page_id, safe='')}"
+    )
+    query = urllib.parse.urlencode(
+        {"fields": "id", "access_token": page_access_token.strip()}
+    )
+    try:
+        page = _facebook_request(f"{page_url}?{query}", None, {})
+    except RuntimeError as exc:
+        raise RuntimeError(
+            "Facebook Page access-token preflight failed. Renew the Page token, "
+            "update the FACEBOOK_PAGE_ACCESS_TOKEN Actions secret, and retry "
+            f"before publishing: {exc}"
+        ) from exc
+
+    if page.get("id") != page_id:
+        raise RuntimeError(
+            "Facebook Page access-token preflight returned a different Page ID. "
+            "Check FACEBOOK_PAGE_ID and FACEBOOK_PAGE_ACCESS_TOKEN."
+        )
 
 
 def publish_facebook_reel(
@@ -742,6 +773,10 @@ def main(argv: list[str] | None = None) -> int:
             args.video.unlink()
             print(f"Set thumbnail and removed local video {args.video}")
             return 0
+        if facebook_page_id:
+            validate_facebook_page_access_token(
+                facebook_page_id, facebook_page_access_token
+            )
         model = args.model or os.environ.get("CLOUDFLARE_AI_MODEL", DEFAULT_MODEL)
         try:
             description = generate_youtube_description(song, account_id, api_token, model)
