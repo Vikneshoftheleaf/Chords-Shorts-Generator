@@ -17,6 +17,11 @@ from music_shorts.youtube_publish import (
 )
 
 
+@pytest.fixture(autouse=True)
+def isolate_dotenv_from_local_credentials(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+
+
 def sample_song() -> Song:
     return Song(
         song_id="popular-song-001",
@@ -167,6 +172,74 @@ def test_generate_youtube_description_posts_only_bounded_context(monkeypatch):
     assert "chord progression" in prompt
     assert "Do not invent" in prompt
     assert "title" not in prompt.lower()
+
+
+def test_publish_facebook_reel_uses_start_upload_and_finish_phases(
+    tmp_path, monkeypatch
+):
+    import urllib.parse
+
+    import music_shorts.youtube_publish as publishing
+
+    video_path = tmp_path / "short.mp4"
+    video_path.write_bytes(b"test-video")
+    requests = []
+
+    class FakeResponse:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return json.dumps(self.payload).encode()
+
+    responses = [
+        {"video_id": "reel-id", "upload_url": "https://rupload.facebook.com/video-upload/reel-id"},
+        {"success": True},
+        {"success": True},
+    ]
+
+    def fake_urlopen(request, timeout):
+        requests.append((request, timeout))
+        return FakeResponse(responses.pop(0))
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    metadata = YouTubeCopy("Track (Artist)", "Reel caption #Shorts", ("piano",))
+
+    result = publishing.publish_facebook_reel(
+        video_path, "page/123", "page-token", metadata
+    )
+
+    assert result == "reel-id"
+    start_request, upload_request, finish_request = [item[0] for item in requests]
+    assert start_request.full_url == (
+        "https://graph.facebook.com/v27.0/page%2F123/video_reels"
+    )
+    assert json.loads(start_request.data) == {
+        "upload_phase": "start",
+        "access_token": "page-token",
+    }
+    assert upload_request.full_url == (
+        "https://rupload.facebook.com/video-upload/v27.0/reel-id"
+    )
+    assert upload_request.data == b"test-video"
+    assert upload_request.get_header("Authorization") == "OAuth page-token"
+    assert upload_request.get_header("Offset") == "0"
+    assert upload_request.get_header("File_size") == str(len(b"test-video"))
+    assert urllib.parse.parse_qs(finish_request.data.decode()) == {
+        "access_token": ["page-token"],
+        "video_id": ["reel-id"],
+        "upload_phase": ["finish"],
+        "video_state": ["PUBLISHED"],
+        "title": ["Track (Artist)"],
+        "description": ["Reel caption #Shorts"],
+    }
+    assert [item[1] for item in requests] == [60, 300, 60]
 
 
 def test_upload_closes_video_stream_after_success(tmp_path, monkeypatch):
@@ -701,6 +774,8 @@ def test_main_upload_requires_exact_confirmation(tmp_path, monkeypatch):
     monkeypatch.setenv("YOUTUBE_CLIENT_ID", "configured-client-id")
     monkeypatch.setenv("YOUTUBE_CLIENT_SECRET", "configured-client-secret")
     monkeypatch.setenv("YOUTUBE_REFRESH_TOKEN", "configured-refresh-token")
+    monkeypatch.setenv("FACEBOOK_PAGE_ID", "facebook-page-id")
+    monkeypatch.setenv("FACEBOOK_PAGE_ACCESS_TOKEN", "facebook-page-token")
     monkeypatch.setattr(
         publishing,
         "generate_youtube_description",
@@ -714,6 +789,12 @@ def test_main_upload_requires_exact_confirmation(tmp_path, monkeypatch):
         return "youtube-id"
 
     monkeypatch.setattr(publishing, "upload_video", fake_upload)
+    facebook_uploads = []
+    monkeypatch.setattr(
+        publishing,
+        "publish_facebook_reel",
+        lambda *args: facebook_uploads.append(args) or "facebook-reel-id",
+    )
     result = main(
         [
             "--video",
@@ -733,6 +814,13 @@ def test_main_upload_requires_exact_confirmation(tmp_path, monkeypatch):
     assert captured["args"][4] == "configured-client-secret"
     assert captured["args"][5] == Path("state/youtube-token.json")
     assert captured["args"][6] == "configured-refresh-token"
+    assert len(facebook_uploads) == 1
+    assert facebook_uploads[0][0] == video_path
+    assert facebook_uploads[0][1:] == (
+        "facebook-page-id",
+        "facebook-page-token",
+        expected_metadata,
+    )
     assert not video_path.exists()
 
 

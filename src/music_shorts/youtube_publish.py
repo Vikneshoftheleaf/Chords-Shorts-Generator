@@ -30,6 +30,7 @@ from .video_utils import extract_first_frame
 
 DEFAULT_DATASET = Path("dataset/hooktheory_billboard_filtered.json")
 DEFAULT_MODEL = "@cf/meta/llama-3.1-8b-instruct"
+FACEBOOK_GRAPH_API_VERSION = "v27.0"
 YOUTUBE_UPLOAD_SCOPE = "https://www.googleapis.com/auth/youtube.upload"
 YOUTUBE_READONLY_SCOPE = "https://www.googleapis.com/auth/youtube.readonly"
 YOUTUBE_SCOPES = (YOUTUBE_UPLOAD_SCOPE, YOUTUBE_READONLY_SCOPE)
@@ -503,10 +504,137 @@ def upload_video(
     return video_id
 
 
+def _facebook_request(
+    url: str,
+    data: bytes,
+    headers: dict[str, str],
+    timeout: int = 60,
+) -> dict[str, Any]:
+    request = urllib.request.Request(url, data=data, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            result = json.loads(response.read())
+    except urllib.error.HTTPError as exc:
+        detail = exc.read(1000).decode("utf-8", errors="replace")
+        raise RuntimeError(
+            f"Facebook API request failed (HTTP {exc.code}): {detail}"
+        ) from exc
+    except (urllib.error.URLError, TimeoutError) as exc:
+        raise RuntimeError(f"Could not reach the Facebook API: {exc}") from exc
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("Facebook API returned invalid JSON.") from exc
+
+    if not isinstance(result, dict):
+        raise RuntimeError("Facebook API returned an invalid response.")
+    error = result.get("error")
+    if isinstance(error, dict):
+        message = error.get("message")
+        raise RuntimeError(
+            f"Facebook API reported an error: {message if isinstance(message, str) else error}"
+        )
+    return result
+
+
+def publish_facebook_reel(
+    video_path: Path,
+    page_id: str,
+    page_access_token: str,
+    metadata: YouTubeCopy,
+) -> str:
+    if not video_path.is_file():
+        raise RuntimeError(f"Video file not found: {video_path}")
+    if not page_id.strip() or not page_access_token.strip():
+        raise RuntimeError(
+            "Set FACEBOOK_PAGE_ID and FACEBOOK_PAGE_ACCESS_TOKEN to publish a Reel."
+        )
+
+    page_url = (
+        f"https://graph.facebook.com/{FACEBOOK_GRAPH_API_VERSION}/"
+        f"{urllib.parse.quote(page_id.strip(), safe='')}/video_reels"
+    )
+    try:
+        start = _facebook_request(
+            page_url,
+            json.dumps(
+                {
+                    "upload_phase": "start",
+                    "access_token": page_access_token.strip(),
+                }
+            ).encode("utf-8"),
+            {"Content-Type": "application/json"},
+        )
+    except RuntimeError as exc:
+        raise RuntimeError(f"Facebook Reel upload initialization failed: {exc}") from exc
+    video_id = start.get("video_id")
+    upload_url = start.get("upload_url")
+    if not isinstance(video_id, str) or not video_id:
+        raise RuntimeError("Facebook did not return a Reel upload video ID.")
+    if not isinstance(upload_url, str) or not upload_url:
+        raise RuntimeError("Facebook did not return a Reel upload URL.")
+    parsed_upload_url = urllib.parse.urlparse(upload_url)
+    if (
+        parsed_upload_url.scheme != "https"
+        or parsed_upload_url.hostname != "rupload.facebook.com"
+        or not parsed_upload_url.path.startswith("/video-upload/")
+    ):
+        raise RuntimeError("Facebook returned an unexpected Reel upload URL.")
+    upload_path = parsed_upload_url.path
+    version_prefix = f"/video-upload/{FACEBOOK_GRAPH_API_VERSION}/"
+    if not upload_path.startswith(version_prefix):
+        upload_path = (
+            version_prefix + upload_path[len("/video-upload/") :].lstrip("/")
+        )
+        upload_url = urllib.parse.urlunparse(
+            parsed_upload_url._replace(path=upload_path)
+        )
+
+    file_size = video_path.stat().st_size
+    try:
+        upload_response = _facebook_request(
+            upload_url,
+            video_path.read_bytes(),
+            {
+                "Authorization": f"OAuth {page_access_token.strip()}",
+                "Content-Type": "application/octet-stream",
+                "offset": "0",
+                "file_size": str(file_size),
+            },
+            timeout=300,
+        )
+    except RuntimeError as exc:
+        raise RuntimeError(f"Facebook Reel video upload failed: {exc}") from exc
+    if upload_response.get("success") is not True:
+        raise RuntimeError("Facebook did not confirm the Reel video upload.")
+
+    try:
+        finish = _facebook_request(
+            page_url,
+            urllib.parse.urlencode(
+                {
+                    "access_token": page_access_token.strip(),
+                    "video_id": video_id,
+                    "upload_phase": "finish",
+                    "video_state": "PUBLISHED",
+                    "title": metadata.title,
+                    "description": metadata.description,
+                }
+            ).encode("utf-8"),
+            {"Content-Type": "application/x-www-form-urlencoded"},
+        )
+    except RuntimeError as exc:
+        raise RuntimeError(f"Facebook Reel publication failed: {exc}") from exc
+    if finish.get("success") is not True:
+        raise RuntimeError("Facebook did not confirm Reel publication.")
+    return video_id
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="music-shorts-publish",
-        description="Generate YouTube copy with Cloudflare AI and manually upload a video.",
+        description=(
+            "Generate YouTube copy with Cloudflare AI and manually publish a video "
+            "to YouTube and an optional Facebook Page."
+        ),
     )
     parser.add_argument("--video", type=Path, required=True, help="generated MP4 to upload")
     parser.add_argument("--song-id", required=True, help="song ID associated with the video")
@@ -554,6 +682,10 @@ def main(argv: list[str] | None = None) -> int:
     client_id = os.environ.get("YOUTUBE_CLIENT_ID", "").strip()
     client_secret = os.environ.get("YOUTUBE_CLIENT_SECRET", "").strip()
     refresh_token = os.environ.get("YOUTUBE_REFRESH_TOKEN", "").strip()
+    facebook_page_id = os.environ.get("FACEBOOK_PAGE_ID", "").strip()
+    facebook_page_access_token = os.environ.get(
+        "FACEBOOK_PAGE_ACCESS_TOKEN", ""
+    ).strip()
     if not account_id or not api_token:
         print(
             "error: set CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN first",
@@ -563,6 +695,13 @@ def main(argv: list[str] | None = None) -> int:
     if not client_id or not client_secret:
         print(
             "error: set YOUTUBE_CLIENT_ID and YOUTUBE_CLIENT_SECRET first",
+            file=sys.stderr,
+        )
+        return 2
+    if bool(facebook_page_id) != bool(facebook_page_access_token):
+        print(
+            "error: set both FACEBOOK_PAGE_ID and FACEBOOK_PAGE_ACCESS_TOKEN, "
+            "or leave both empty",
             file=sys.stderr,
         )
         return 2
@@ -618,6 +757,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"\nDescription:\n{metadata.description}")
         print(f"\nTags: {', '.join(metadata.tags)}")
         print(f"\nThe video will be uploaded as {args.privacy_status.upper()}.")
+        if facebook_page_id:
+            print("A public Facebook Page Reel will also be published.")
+        else:
+            print(
+                "Facebook publishing is not configured; only YouTube will be published."
+            )
         if not args.yes:
             try:
                 confirmation = input("Type UPLOAD to authorize the YouTube upload: ")
@@ -638,6 +783,22 @@ def main(argv: list[str] | None = None) -> int:
         )
         video_url = f"https://www.youtube.com/watch?v={video_id}"
         print(f"Uploaded {args.privacy_status} video with first-frame thumbnail: {video_url}")
+        if facebook_page_id:
+            try:
+                facebook_video_id = publish_facebook_reel(
+                    args.video,
+                    facebook_page_id,
+                    facebook_page_access_token,
+                    metadata,
+                )
+            except (OSError, RuntimeError) as exc:
+                raise RuntimeError(
+                    f"YouTube upload succeeded ({video_url}), but Facebook Reel "
+                    f"publishing failed. The local video was retained; do not retry "
+                    f"both platforms without accounting for the existing YouTube "
+                    f"upload: {exc}"
+                ) from exc
+            print(f"Published Facebook Page Reel with video ID {facebook_video_id}.")
         try:
             args.video.unlink()
         except OSError as exc:

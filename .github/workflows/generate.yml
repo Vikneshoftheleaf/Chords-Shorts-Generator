@@ -27,6 +27,8 @@ jobs:
           YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
           YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
           YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
+          FACEBOOK_PAGE_ID: ${{ secrets.FACEBOOK_PAGE_ID }}
+          FACEBOOK_PAGE_ACCESS_TOKEN: ${{ secrets.FACEBOOK_PAGE_ACCESS_TOKEN }}
         shell: bash
         run: |
           test -n "$CLOUDFLARE_ACCOUNT_ID" || { echo "::error::Missing CLOUDFLARE_ACCOUNT_ID Actions secret"; exit 1; }
@@ -34,6 +36,8 @@ jobs:
           test -n "$YOUTUBE_CLIENT_ID" || { echo "::error::Missing YOUTUBE_CLIENT_ID Actions secret"; exit 1; }
           test -n "$YOUTUBE_CLIENT_SECRET" || { echo "::error::Missing YOUTUBE_CLIENT_SECRET Actions secret"; exit 1; }
           test -n "$YOUTUBE_REFRESH_TOKEN" || { echo "::error::Missing YOUTUBE_REFRESH_TOKEN Actions secret"; exit 1; }
+          test -n "$FACEBOOK_PAGE_ID" || { echo "::error::Missing FACEBOOK_PAGE_ID Actions secret"; exit 1; }
+          test -n "$FACEBOOK_PAGE_ACCESS_TOKEN" || { echo "::error::Missing FACEBOOK_PAGE_ACCESS_TOKEN Actions secret"; exit 1; }
       - name: Install FluidSynth
         run: |
           sudo apt-get -o Acquire::Retries=3 update
@@ -92,7 +96,7 @@ jobs:
           print(f"video={video}")
           print(f"song_id={matches[0].song_id}")
           PY
-      - name: Upload public Short and set first-frame thumbnail
+      - name: Publish public YouTube Short and Facebook Reel
         if: steps.generate.outputs.publish == 'true'
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
@@ -100,6 +104,8 @@ jobs:
           YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
           YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
           YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
+          FACEBOOK_PAGE_ID: ${{ secrets.FACEBOOK_PAGE_ID }}
+          FACEBOOK_PAGE_ACCESS_TOKEN: ${{ secrets.FACEBOOK_PAGE_ACCESS_TOKEN }}
           VIDEO_PATH: ${{ steps.generate.outputs.video }}
           SONG_ID: ${{ steps.generate.outputs.song_id }}
         shell: bash
